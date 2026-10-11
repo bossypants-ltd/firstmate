@@ -1447,7 +1447,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions $(claude_worker_add_dirs "$HOME_DIR" "$id")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions $(claude_worker_add_dirs "$HOME_DIR" "$id")--settings '$(claude_worker_settings_file "$HOME_DIR" "$id")'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -1531,19 +1531,23 @@ test_non_claude_harness_ignores_config_dir() {
 # The captain's attribution policy lives in the `user` settings scope, which a
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
-# Co-Authored-By and Claude-Session trailers into commits and PR bodies.
+# Co-Authored-By and Claude-Session trailers into commits and PR bodies. The
+# launch carries it in the firstmate-owned settings file its one --settings flag
+# names, so these read that file's contents.
 assert_attribution_policy() {  # <launch-command> <what>
   local launch=$1 what=$2 settings
-  settings=$(claude_settings_json_arg "$launch")
+  settings=$(claude_settings_json_arg "$launch") \
+    || fail "$what launch does not pass a --settings file: $launch"
   printf '%s' "$settings" | jq -e '.feedbackDrafts == "off" and .attribution == {"commit":"","pr":"","sessionUrl":false}' >/dev/null \
-    || fail "$what launch settings JSON does not disable Claude attribution: $settings"
+    || fail "$what launch settings do not disable Claude attribution: $settings"
 }
 
 assert_attribution_policy_absent() {  # <launch-command> <what>
   local launch=$1 what=$2 settings
-  settings=$(claude_settings_json_arg "$launch")
+  settings=$(claude_settings_json_arg "$launch") \
+    || fail "$what launch does not pass a --settings file: $launch"
   printf '%s' "$settings" | jq -e '.feedbackDrafts == "off" and (has("attribution") | not)' >/dev/null \
-    || fail "$what launch settings JSON still disables Claude attribution: $settings"
+    || fail "$what launch settings still disable Claude attribution: $settings"
 }
 
 test_claude_task_launch_carries_control_channel_authority() {
@@ -2021,10 +2025,12 @@ claude_settings_json_arg() {  # <launch>
   while [ "$#" -gt 0 ]; do
     if [ "$1" = --settings ]; then
       shift
-      # Claude Code's --settings takes inline JSON or a file path; a
-      # secondmate launch passes the path form.
+      # Claude Code's --settings takes inline JSON or a file path. Every
+      # launch firstmate composes (crewmate, scout, and secondmate) passes the
+      # path form, the firstmate-owned state/<id>.claude-settings.json, so an
+      # inline value is a regression and reads as no settings at all.
       case "$1" in
-      \{*) printf '%s' "$1" ;;
+      \{*) return 1 ;;
       *) cat "$1" ;;
       esac
       return 0
@@ -2057,13 +2063,21 @@ claude_worker_add_dirs() {  # <home> <id>
   printf '%s ' "--add-dir '$state_real/operational-inbox' --add-dir '$state_real/$2.inbox' --add-dir '$data_real/$2' --add-dir '$root_real/.agents/skills'"
 }
 
+# The firstmate-owned settings file a Claude worker launch passes to its one
+# --settings flag, real-path resolved the way the spawn's STATE_REAL is.
+claude_worker_settings_file() {  # <home> <id>
+  local state_real
+  state_real=$(cd "$1/state" && pwd -P)
+  printf '%s' "$state_real/$2.claude-settings.json"
+}
+
 claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
   local doorbell quoted
   doorbell=$(claude_launch_brief_arg "$1")
   [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || doorbell="not a launch-brief doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --no-chrome $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '$(claude_worker_settings_file "$2" "$3")' --no-chrome $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {

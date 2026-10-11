@@ -241,12 +241,20 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$state/$id.claude-settings.json"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
+  # The launch's one --settings value is this file, so it must also carry the
+  # session keys the launch needs (feedbackDrafts and the attribution policy).
+  jq -e '.feedbackDrafts == "off" and .attribution == {"commit":"","pr":"","sessionUrl":false}' \
+    "$settings" >/dev/null || fail "claude hook settings dropped the launch policy"
+  # The worktree's own .claude/settings.local.json is the project's file (or
+  # Claude Code's "don't ask again" store); firstmate must never write it.
+  assert_absent "$WT_DIR/.claude/settings.local.json" \
+    "claude spawn must not write the worktree's .claude/settings.local.json"
 
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
@@ -279,13 +287,140 @@ test_claude_hooks_stale_incarnation_harmless() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$state/$id.claude-settings.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
   run_claude_hook "$settings" UserPromptSubmit \
     || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+# A project may commit .claude/settings.local.json (a permissions allow-list,
+# env, plugins). A Claude worker spawned into such a project must leave that
+# file byte-identical and the worktree clean, because its hooks ride the
+# firstmate-owned settings file the launch names through --settings.
+# make_tracked_settings_case builds that world and echoes a record shaped like
+# make_spawn_case's, with the committed bytes saved beside it.
+make_tracked_settings_case() {  # <name> <harness> <id>
+  local name=$1 harness=$2 id=$3 case_dir home proj wt fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fm_test_spawn_home "$home" "$harness"
+  fm_git_init_commit "$proj"
+  mkdir -p "$proj/.claude"
+  printf '{\n  "permissions": {\n    "allow": [\n      "Bash(npm test:*)",\n      "Bash(git push:*)"\n    ]\n  }\n}\n' \
+    > "$proj/.claude/settings.local.json"
+  git -C "$proj" add -f .claude/settings.local.json
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm settings
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  git -C "$proj" worktree add --quiet -b "wt-$name" "$wt"
+  fm_test_spawn_brief "$home" "$id"
+  cp "$wt/.claude/settings.local.json" "$case_dir/settings.committed"
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+}
+
+assert_tracked_settings_untouched() {  # <case-dir> <wt> <what>
+  local case_dir=$1 wt=$2 what=$3 out exclude
+  cmp -s "$case_dir/settings.committed" "$wt/.claude/settings.local.json" \
+    || fail "$what rewrote the project's committed .claude/settings.local.json: $(git -C "$wt" diff --stat)"
+  out=$(git -C "$wt" status --porcelain)
+  [ -z "$out" ] || fail "$what left the worktree dirty: $out"
+  exclude=$(git -C "$wt" rev-parse --git-path info/exclude)
+  case "$exclude" in /*) ;; *) exclude="$wt/$exclude" ;; esac
+  if grep -qxF '.claude/settings.local.json' "$exclude" 2>/dev/null; then
+    fail "$what git-excluded the project's .claude/settings.local.json"
+  fi
+}
+
+test_claude_spawn_leaves_a_tracked_project_settings_file_untouched() {
+  local rec id=busy-cl-tracked out settings launch_log
+  rec=$(make_tracked_settings_case claude-tracked-settings claude "$id")
+  read_case_record "$rec"
+  launch_log="$CASE_DIR/launch.log"
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  settings="$(cd "$HOME_DIR/state" && pwd -P)/$id.claude-settings.json"
+  assert_tracked_settings_untouched "$CASE_DIR" "$WT_DIR" "claude spawn"
+  assert_grep "--settings '$settings'" "$launch_log" \
+    "claude launch does not load the per-task settings file"
+  assert_present "$settings" "claude spawn did not write the per-task settings file"
+  jq -e '.hooks.UserPromptSubmit and .hooks.Stop and .hooks.StopFailure and .hooks.SessionEnd
+    and .feedbackDrafts == "off" and .attribution == {"commit":"","pr":"","sessionUrl":false}' \
+    "$settings" >/dev/null || fail "per-task settings lack the hooks or the launch policy: $(cat "$settings")"
+  pass "a claude spawn leaves a project's committed .claude/settings.local.json untouched and loads its hooks and launch policy from the per-task settings file"
+}
+
+test_claude_spawn_with_keep_ai_trailers_omits_attribution_from_the_settings_file() {
+  local rec id=busy-cl-keep out settings
+  rec=$(make_tracked_settings_case claude-keep-trailers claude "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/keep-ai-trailers"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn with keep-ai-trailers should succeed: $out"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
+  assert_tracked_settings_untouched "$CASE_DIR" "$WT_DIR" "claude spawn with keep-ai-trailers"
+  jq -e '.hooks.UserPromptSubmit and .hooks.Stop and .feedbackDrafts == "off" and (has("attribution") | not)' \
+    "$settings" >/dev/null || fail "keep-ai-trailers settings carry attribution or lack the hooks: $(cat "$settings")"
+  pass "a claude spawn with keep-ai-trailers keeps the hooks and feedbackDrafts in the settings file and drops attribution"
+}
+
+test_claude_scout_spawn_uses_the_state_settings_file_too() {
+  local rec id=busy-cl-scout out settings
+  rec=$(make_tracked_settings_case claude-scout-settings claude "$id")
+  read_case_record "$rec"
+  out=$(fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --scout)
+  expect_code 0 $? "claude scout spawn should succeed: $out"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
+  assert_tracked_settings_untouched "$CASE_DIR" "$WT_DIR" "claude scout spawn"
+  jq -e '.hooks.UserPromptSubmit and .hooks.Stop and .hooks.StopFailure and .hooks.SessionEnd
+    and .feedbackDrafts == "off" and .attribution.commit == ""' \
+    "$settings" >/dev/null || fail "scout settings lack the hooks or the launch policy: $(cat "$settings")"
+  pass "a claude scout spawn writes the same per-task settings file and leaves the project's settings.local.json alone"
+}
+
+# A raw launch command carries no --settings flag, so the per-task settings file
+# could never reach claude. The spawn must not arm a busy generation nothing can
+# clear, must not fall back to writing the worktree's settings.local.json, and
+# must say once that the task runs without semantic busy state.
+test_raw_claude_launch_has_no_semantic_wiring() {
+  local rec id=busy-cl-raw out state
+  rec=$(make_tracked_settings_case claude-raw claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'claude --debug')
+  expect_code 0 $? "raw claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_absent "$state/$id.busy-gen" "raw claude launch must not arm a busy generation"
+  assert_absent "$state/$id.busy-state" "raw claude launch must not seed a busy record"
+  assert_absent "$state/$id.claude-settings.json" "raw claude launch must not write hook settings"
+  assert_tracked_settings_untouched "$CASE_DIR" "$WT_DIR" "raw claude spawn"
+  [ "$(printf '%s\n' "$out" | grep -c "raw claude launch cannot carry firstmate's per-task hook settings")" = 1 ] \
+    || fail "raw claude launch should warn exactly once: $out"
+  assert_contains "$out" "$id runs without semantic busy state or turn-end notifications" \
+    "the raw claude warning should name the task and what it lacks"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw claude launch must classify unknown, got '$out'"
+
+  # An arm an earlier incarnation left (a raw --relaunch over an armed task)
+  # must be retired rather than left as a record nothing will ever update.
+  id=busy-cl-raw-over-armed
+  rec=$(make_tracked_settings_case claude-raw-over-armed claude "$id")
+  read_case_record "$rec"
+  state="$HOME_DIR/state"
+  mkdir -p "$state"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null \
+    || fail "could not seed an earlier busy generation for $id"
+  assert_present "$state/$id.busy-gen" "the seeded earlier busy generation is missing"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'claude --debug')
+  expect_code 0 $? "raw claude spawn over an armed record should succeed: $out"
+  assert_absent "$state/$id.busy-gen" "raw claude launch kept the earlier busy generation"
+  assert_absent "$state/$id.busy-state" "raw claude launch kept the earlier busy record"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw claude launch over an armed record must classify unknown, got '$out'"
+  pass "raw claude launch warns once, arms nothing, writes no settings, retires an earlier arm, and classifies unknown"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -850,6 +985,10 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_spawn_leaves_a_tracked_project_settings_file_untouched
+test_claude_spawn_with_keep_ai_trailers_omits_attribution_from_the_settings_file
+test_claude_scout_spawn_uses_the_state_settings_file_too
+test_raw_claude_launch_has_no_semantic_wiring
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring

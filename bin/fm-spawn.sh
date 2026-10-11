@@ -382,9 +382,11 @@
 #     __CLAUDEADDDIRS__ quoted --add-dir flags granting exactly this task's
 #                  Firstmate channel directories (claude_add_dirs_flag below;
 #                  supplies its own trailing space, empty never used)
-#     __CLAUDESETTINGS__ the single claude --settings value: a quoted inline
-#                  JSON object for a crewmate or scout, or a quoted path to
-#                  state/<task-id>.claude-settings.json for a secondmate
+#     __CLAUDESETTINGS__ the single claude --settings value: a quoted path to
+#                  state/<task-id>.claude-settings.json, the firstmate-owned
+#                  file that holds the session keys (feedbackDrafts and the
+#                  attribution policy) beside this task's busy-state hooks,
+#                  for a crewmate, a scout, and a secondmate alike
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
@@ -432,9 +434,17 @@
 # A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
 # and retires any arm an earlier launch of that mate left, so its verdict is unknown:
 # the raw command carries no --settings or -e flag to load the wiring.
+# A raw claude launch for a crewmate or scout is left unarmed the same way, and the
+# spawn warns that the task runs without semantic busy state or turn-end notifications.
 # A claude secondmate gets no Stop busy hook; its home's tracked Stop guard is its
 # only Stop writer, through the .fm-busy-stop pointer in that home. A home whose
 # guard predates that pointer keeps the ordinary Stop idle hook instead.
+# Every claude launch built from the canonical template (crewmate, scout, or
+# secondmate) carries its busy-state hooks in a firstmate-owned
+# state/<id>.claude-settings.json that the launch passes through its single
+# --settings value, and the spawn never writes, truncates, git-excludes, or deletes
+# the worktree's or home's own .claude/settings.local.json: a project may commit
+# that file, and Claude Code stores its "don't ask again" rules there.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
@@ -482,8 +492,9 @@
 # seen and firstmate cannot answer it. That helper's header owns the structural
 # scope test for both shapes and every refusal; a failed registration stops this
 # spawn rather than launching a worker that would wedge on the dialog.
-# Unless config/keep-ai-trailers is present, every claude launch carries the
-# attribution-off policy in its per-launch --settings JSON, so a spawned worker
+# Unless config/keep-ai-trailers is present, every claude launch built from the
+# canonical template carries the attribution-off policy in its per-launch
+# --settings file (state/<id>.claude-settings.json), so a spawned worker
 # never writes a Co-Authored-By trailer, Claude-Session link, or generated-with
 # line into a commit or PR body; launch_template() below owns the reason it
 # cannot come from the captain's own settings.
@@ -2082,13 +2093,13 @@ launch_template() {
   # feedback flow (the SendFeedback tool), deliberately layered so a fleet-launched
   # agent never queues or submits a bug-report draft on the captain's behalf even
   # under a managed Claude settings policy: CLAUDE_CODE_SEND_FEEDBACK=0 is read
-  # directly and is not subject to managed-settings precedence, while --settings
-  # '{"feedbackDrafts":"off"}' sets the documented settings key (Claude Code
-  # changelog 2.1.247) that a managed policy CAN override back on. Either control
-  # alone disables the feature; keep both so a managed override of one still
-  # leaves the other in force. Both are per-launch, scoped to this invocation only,
-  # and never touch the captain's global ~/.claude/settings.json.
-  # Unless config/keep-ai-trailers is present, the same inline --settings JSON
+  # directly and is not subject to managed-settings precedence, while the
+  # "feedbackDrafts":"off" key in the --settings file sets the documented settings
+  # key (Claude Code changelog 2.1.247) that a managed policy CAN override back on.
+  # Either control alone disables the feature; keep both so a managed override of
+  # one still leaves the other in force. Both are per-launch, scoped to this
+  # invocation only, and never touch the captain's global ~/.claude/settings.json.
+  # Unless config/keep-ai-trailers is present, the same --settings file
   # also carries the attribution policy
   # ("attribution": {"commit": "", "pr": "", "sessionUrl": false}), which
   # suppresses Claude Code's Co-Authored-By trailer, Claude-Session link, and
@@ -2098,10 +2109,13 @@ launch_template() {
   # otherwise run with attribution back on; carrying it per launch keeps the
   # policy in force regardless of which settings scopes end up loaded.
   # Claude Code's --settings flag takes one value, a file path or an inline
-  # JSON string (https://code.claude.com/docs/en/cli-reference). A secondmate's
-  # busy hooks share that value, in state/<id>.claude-settings.json, and the
-  # file also carries feedbackDrafts and attribution so those session keys
-  # stay in force.
+  # JSON string (https://code.claude.com/docs/en/cli-reference). Every launch
+  # built from this template passes the path form: the firstmate-owned
+  # state/<id>.claude-settings.json, which holds the task's busy-state and
+  # turn-end hooks beside feedbackDrafts and attribution so those session keys
+  # stay in force. The hooks never go into the worktree's
+  # .claude/settings.local.json, which a project may commit; a raw launch command
+  # cannot carry this flag, so it gets neither the hooks nor the session keys.
   # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
   # selects (header above): --dangerously-skip-permissions by default, or
   # --permission-mode auto for a captain who refuses bypass mode.
@@ -2258,8 +2272,8 @@ launch_template() {
   # is trusted.
   # GEMINI_CLI_SYSTEM_SETTINGS_PATH points gemini at the firstmate-owned
   # per-task settings file written below. It is deliberately NOT the
-  # worktree's .gemini/settings.json: unlike claude's settings.local.json,
-  # that path is the PROJECT's own committed settings file, so writing it
+  # worktree's .gemini/settings.json: like claude's settings.local.json,
+  # that path can be the PROJECT's own committed settings file, so writing it
   # would clobber a project's configuration and removing it at teardown
   # would delete a tracked file. The system layer also makes the busy
   # contract independent of the trust decision above (its hooks were
@@ -4661,7 +4675,12 @@ fi
 # stays on the ordinary-task path below. A raw launch command for a claude,
 # pi, pi-signed, or omp secondmate is not armed: those four reach their
 # wiring only through a launch-template flag (--settings, -e) that a raw
-# command does not carry, so the record would never be updated.
+# command does not carry, so the record would never be updated. A raw claude
+# launch for a crewmate or scout is not armed either: its hooks reach claude
+# only through --settings, since a spawn never writes them into the worktree's
+# own .claude/settings.local.json, so it warns instead of arming a record
+# nothing can clear, and retires any arm an earlier incarnation left (a raw
+# --relaunch over an armed task), as a raw secondmate launch does.
 busy_notify_turnend=true
 WIRING_HARNESS=$HARNESS
 if [ "$KIND" = secondmate ]; then
@@ -4682,6 +4701,19 @@ if [ "$KIND" = secondmate ]; then
     claude*) rm -f "$WT/.fm-busy-stop" ;;
     esac
   fi
+elif [ "$RAW_LAUNCH" -ne 0 ]; then
+  case "$HARNESS" in
+  claude*)
+    WIRING_HARNESS=
+    if [ -e "$STATE_REAL/$ID.busy-gen" ]; then
+      "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --current-gen || {
+        echo "error: failed to retire the earlier busy-state contract for $ID" >&2
+        exit 1
+      }
+    fi
+    echo "warning: a raw claude launch cannot carry firstmate's per-task hook settings, so $ID runs without semantic busy state or turn-end notifications" >&2
+    ;;
+  esac
 fi
 BUSY_GEN=
   case "$WIRING_HARNESS" in
@@ -4737,15 +4769,19 @@ BUSY_GEN=
     # the ordinary Stop idle hook, without the parent turn-ended touch. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
-    # A crewmate writes those hooks into the disposable worktree's
-    # .claude/settings.local.json. A secondmate does not: that file in a
-    # persistent home is where Claude Code stores the captain's "don't ask
-    # again" rules, and rewriting it drops them. The secondmate hooks go in
-    # a firstmate-owned state/<id>.claude-settings.json passed through
-    # --settings. Claude Code merges hook entries across settings files
+    # Every kind writes those hooks into a firstmate-owned
+    # state/<id>.claude-settings.json that the launch passes through its single
+    # --settings value (__CLAUDESETTINGS__), and never into a
+    # .claude/settings.local.json. That file belongs to the project or the
+    # captain: a project may commit it, so writing it would drop the project's
+    # own permission rules and leave the worktree dirty with firstmate's wiring
+    # (git-excluding it does nothing for a tracked file), and where it is not
+    # committed it is where Claude Code stores "don't ask again" rules, which a
+    # rewrite drops. Claude Code merges hook entries across settings files
     # (https://code.claude.com/docs/en/hooks) and keeps any key
     # the flag omits (https://code.claude.com/docs/en/cli-reference), so the
-    # home's tracked Stop guard and its settings.local.json both stay.
+    # project's or home's own settings.local.json and a secondmate home's
+    # tracked Stop guard all stay. The one file also carries the session keys.
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
@@ -4769,17 +4805,11 @@ BUSY_GEN=
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
     hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
-    if [ "$KIND" = secondmate ]; then
-      session_keys='"feedbackDrafts":"off",'
-      if [ "$KEEP_AI_TRAILERS" != 1 ]; then
-        session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
-      fi
-      printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
-    else
-      mkdir -p "$WT/.claude"
-      printf '{%s}\n' "$hooks_json" >"$WT/.claude/settings.local.json"
-      exclude_path '.claude/settings.local.json'
+    session_keys='"feedbackDrafts":"off",'
+    if [ "$KEEP_AI_TRAILERS" != 1 ]; then
+      session_keys='"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},'
     fi
+    printf '{%s%s}\n' "$session_keys" "$hooks_json" >"$STATE_REAL/$ID.claude-settings.json"
     ;;
   devin)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -5369,19 +5399,9 @@ LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 case "$LAUNCH" in
 *__CLAUDESETTINGS__*)
-  if [ "$KIND" = secondmate ]; then
-    LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
-  else
-    claude_settings="'{\"feedbackDrafts\":\"off\"__CLAUDEATTRIBUTION__}'"
-    LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$claude_settings}
-  fi
+  LAUNCH=${LAUNCH//__CLAUDESETTINGS__/$(shell_quote "$STATE_REAL/$ID.claude-settings.json")}
   ;;
 esac
-if [ "$KEEP_AI_TRAILERS" = 1 ]; then
-  LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/}
-else
-  LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/,'"attribution":{"commit":"","pr":"","sessionUrl":false}'}
-fi
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
     echo "error: could not resolve this task's home paths for rovo's allowedExternalPaths grant" >&2
