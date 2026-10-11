@@ -6,7 +6,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Busy | Owned hooks in firstmate's `state/<id>.claude-settings.json`, loaded through the launch's single `--settings` and never written into the project's own `.claude/settings.local.json`: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a secondmate gets no `Stop` busy hook, because its home's tracked Stop guard is its only Stop writer, unless that guard predates `.fm-busy-stop` and the launch keeps the `Stop` idle hook (`../../../docs/turnend-guard.md` owns that); manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. That file rides the canonical exact `claude` launch template, so a raw claude-shaped launch receives no per-task settings file: the spawn warns, and that worker has no trusted busy state and no turn-end notification, exactly like a raw gemini launch. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
@@ -70,8 +70,9 @@ A `--secondmate` launch omits the statement because a secondmate operates under 
 ## Primary integration
 
 [`../../../../../docs/verification/supervision.md`](../../../../../docs/verification/supervision.md#turn-end-guard) records the current primary and Stop auto-arm live evidence.
-This differs from the worker hook, which only touches a task marker through `.claude/settings.local.json`.
-A Claude secondmate's busy hooks are not that file: `bin/fm-spawn.sh` passes the parent home's `state/<id>.claude-settings.json` through `--settings` and does not edit the mate home's `settings.local.json`.
+This differs from the worker hook, which only touches a task marker through its per-task settings file.
+Every Claude worker and secondmate gets its hooks from `state/<id>.claude-settings.json` in the launching home, which `bin/fm-spawn.sh` passes through `--settings`; it never writes, truncates, or deletes a worktree's or mate home's `settings.local.json`, which a project may commit and where Claude Code stores "don't ask again" rules.
+`bin/fm-teardown.sh` removes a worktree's `.claude/settings.local.json` only when git does not track it, as an older spawn's leftover wiring.
 
 Primary `.claude/settings.json` registers `../../../bin/fm-turnend-guard.sh --claude` and `../../../bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
 Guard exit 2 plus stderr forces continuation.

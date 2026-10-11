@@ -645,7 +645,9 @@ Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 
 A tmux-backed secondmate's active-turn gate reads the parent home's semantic busy record.
 Launches of opencode, pi, pi-signed, and omp arm that record and load the same hook or extension an ordinary worker uses, and those hooks do not touch the parent's turn-ended marker.
 A Claude secondmate arms the same record through busy hooks in the parent home's `state/<id>.claude-settings.json`, passed as Claude Code's `--settings` file, and does not write the mate home's `.claude/settings.local.json`.
+A Claude crewmate or scout loads its busy and turn-end hooks the same way, from its own `state/<id>.claude-settings.json`, and no launch writes a worktree's `.claude/settings.local.json`.
 That `--settings` load and the merge of its hook entries with the home's own hooks rest on Claude Code's documentation (<https://code.claude.com/docs/en/cli-reference>, <https://code.claude.com/docs/en/hooks>) and not on a live run recorded in this section: the sample output below predates the `--settings` mechanism.
+No live run of the crewmate or scout placement is recorded in this file yet either.
 A Claude secondmate is the one exception on Stop: its home's tracked Stop guard is the only Stop writer, recording idle when it allows the Stop and busy when it blocks it into a continuation, because Claude runs Stop hooks in parallel.
 Claude Code 2.1.278 was probed live in a scratch project with logging `UserPromptSubmit` and `Stop` hooks.
 A synchronous Stop hook that exits 2 forced a continuation with no `UserPromptSubmit`, which is why the guard itself records busy when it blocks.
@@ -1128,7 +1130,7 @@ The credential must also be present before the session-provider daemon starts, s
 
 ### Settings placement
 
-Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because unlike Claude's `settings.local.json` that path is the project's own committed settings file.
+Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because, like Claude's `settings.local.json`, that path can be the project's own committed settings file.
 They go to a firstmate-owned `state/<id>.gemini-settings.json` reached through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
 Two measurements support that choice.
 Hooks from the system layer fired under `--skip-trust` in an untrusted folder, so the busy contract does not depend on the trust decision:

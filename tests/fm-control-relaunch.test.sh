@@ -632,20 +632,94 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   local dir out rc
   dir=$(new_case switch rl4)
   add_ship_task "$dir" rl4 claude
-  # Wiring the previous claude incarnation left in the worktree.
-  mkdir -p "$dir/wt/.claude"
-  printf '{"hooks":{}}\n' > "$dir/wt/.claude/settings.local.json"
+  # Wiring the previous claude incarnation left: its firstmate-owned settings file.
+  printf '{"hooks":{}}\n' > "$dir/home/state/rl4.claude-settings.json"
   printf 'codex' > "$dir/fake/becomes"
   out=$(run_control "$dir" rl4 relaunch --harness codex --note "switching runtime"); rc=$?
   expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
   assert_contains "$out" "harness=codex from=claude" "the outcome should name both harnesses"
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
-  [ ! -e "$dir/wt/.claude/settings.local.json" ] \
+  [ ! -e "$dir/home/state/rl4.claude-settings.json" ] \
     || fail "the previous harness's per-task wiring must be cleared on a switch"
   assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
+}
+
+# A project may commit .claude/settings.local.json. Relaunch retires the
+# previous incarnation's wiring and arms the replacement's, but neither step may
+# delete, truncate, or rewrite that file: a claude worker's hooks live in the
+# firstmate-owned state/<id>.claude-settings.json, the only claude wiring to retire.
+commit_project_claude_settings() {  # <case-dir>
+  local dir=$1
+  mkdir -p "$dir/wt/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test:*)"]}}' > "$dir/wt/.claude/settings.local.json"
+  git -C "$dir/wt" add -f .claude/settings.local.json
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm 'project settings'
+  cp "$dir/wt/.claude/settings.local.json" "$dir/settings.committed"
+}
+
+test_same_harness_relaunch_leaves_a_tracked_project_claude_settings_file_untouched() {
+  local dir out rc settings
+  dir=$(new_case tracked-same rl45)
+  add_ship_task "$dir" rl45 claude
+  commit_project_claude_settings "$dir"
+  settings="$dir/home/state/rl45.claude-settings.json"
+  # The previous incarnation's wiring: a placeholder the replacement must re-arm.
+  printf '{"hooks":{}}\n' > "$settings"
+  out=$(run_control "$dir" rl45 relaunch --note "same harness over a committed settings file"); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch should succeed"$'\n'"$out"
+  cmp -s "$dir/settings.committed" "$dir/wt/.claude/settings.local.json" \
+    || fail "a same-harness relaunch changed the project's committed .claude/settings.local.json"
+  [ -z "$(git -C "$dir/wt" status --porcelain)" ] \
+    || fail "a same-harness relaunch left the worktree dirty: $(git -C "$dir/wt" status --porcelain)"
+  assert_grep '"UserPromptSubmit"' "$settings" \
+    "the replacement's hooks should be re-armed in the per-task settings file"
+  assert_grep '"feedbackDrafts":"off"' "$settings" \
+    "the re-armed per-task settings file should carry the launch policy"
+  pass "fm-control relaunch: a same-harness relaunch leaves a committed .claude/settings.local.json byte-identical and re-arms the per-task settings file"
+}
+
+test_harness_switch_leaves_a_tracked_project_claude_settings_file_untouched() {
+  local dir out rc
+  dir=$(new_case tracked-switch rl46)
+  add_ship_task "$dir" rl46 claude
+  commit_project_claude_settings "$dir"
+  printf '{"hooks":{}}\n' > "$dir/home/state/rl46.claude-settings.json"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl46 relaunch --harness codex --note "leaving claude over a committed settings file"); rc=$?
+  expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl46.claude-settings.json" ] \
+    || fail "the previous claude wiring must still be retired on a switch"
+  cmp -s "$dir/settings.committed" "$dir/wt/.claude/settings.local.json" \
+    || fail "a switch away from claude deleted or rewrote the project's committed .claude/settings.local.json"
+  [ -z "$(git -C "$dir/wt" status --porcelain)" ] \
+    || fail "a switch away from claude left the worktree dirty: $(git -C "$dir/wt" status --porcelain)"
+  pass "fm-control relaunch: switching away from claude retires the per-task settings file and leaves a committed .claude/settings.local.json alone"
+}
+
+# fm_control_harness_wiring_paths is what a relaunch deletes, so claude's entry
+# must name only firstmate-owned files: the per-task settings file for every
+# kind, plus a secondmate's Stop pointer, and never a settings.local.json that
+# a project may track.
+test_claude_wiring_paths_never_list_a_settings_local_file() {
+  local kind out
+  out=$(fm_control_harness_wiring_paths claude /wt /st id1)
+  [ "$out" = "/st/id1.claude-settings.json" ] \
+    || fail "claude wiring without a kind should be the per-task settings file alone, got '$out'"
+  for kind in ship scout; do
+    out=$(fm_control_harness_wiring_paths claude /wt /st id1 "$kind")
+    [ "$out" = "/st/id1.claude-settings.json" ] \
+      || fail "a claude $kind should retire only the per-task settings file, got '$out'"
+  done
+  out=$(fm_control_harness_wiring_paths claude /home /st id1 secondmate)
+  [ "$out" = "/st/id1.claude-settings.json"$'\n'"/home/.fm-busy-stop" ] \
+    || fail "a claude secondmate should retire the per-task settings file and its Stop pointer, got '$out'"
+  case "$out" in
+    *settings.local.json*) fail "claude wiring must never list a settings.local.json, got '$out'" ;;
+  esac
+  pass "fm-control-lib: claude wiring is the per-task settings file (plus a secondmate's Stop pointer), never a settings.local.json"
 }
 
 test_harness_switch_does_not_carry_the_old_profile_axes() {
@@ -904,8 +978,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
   local dir hook out rc real_rm
   dir=$(new_case wiring-failure rl29)
   add_ship_task "$dir" rl29 claude
-  hook="$dir/wt/.claude/settings.local.json"
-  mkdir -p "${hook%/*}"
+  hook="$dir/home/state/rl29.claude-settings.json"
   printf '{}\n' > "$hook"
   real_rm=$(command -v rm)
   make_rm_failure_stub "$dir"
@@ -1504,7 +1577,7 @@ test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
   expect_code 1 "$rc" "a failed metadata publication should fail closed"$'\n'"$out"
   [ "$(meta_field "$dir" rl28 harness)" = claude ] \
     || fail "a failed publication should retain the prior durable record"
-  [ ! -e "$dir/wt/.claude/settings.local.json" ] \
+  [ ! -e "$dir/home/state/rl28.claude-settings.json" ] \
     || fail "an aborted replacement should remove its harness wiring"
   [ ! -e "$dir/home/state/rl28.busy-gen" ] \
     || fail "an aborted replacement should retire its busy generation"
@@ -1865,8 +1938,7 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close() {
   meta="$dir/home/state/rl36.meta"
   printf 'spawn_gen=spawn-pending\n' >> "$meta"
   cp "$meta" "$dir/meta.before"
-  mkdir -p "$dir/wt/.claude"
-  printf 'prior wiring\n' > "$dir/wt/.claude/settings.local.json"
+  printf 'prior wiring\n' > "$dir/home/state/rl36.claude-settings.json"
   marker="$dir/home/state/rl36.backlog-close"
   printf 'id=rl36\ndata=%s\nspawn_gen=spawn-pending\narg=--note\narg=local%%20main\n' \
     "$dir/home/data" > "$marker"
@@ -1878,7 +1950,7 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close() {
     "the refusal should identify the close that still owns the task"
   cmp -s "$dir/meta.before" "$meta" \
     || fail "pending-close refusal replaced the task incarnation"
-  assert_grep 'prior wiring' "$dir/wt/.claude/settings.local.json" \
+  assert_grep 'prior wiring' "$dir/home/state/rl36.claude-settings.json" \
     "pending-close refusal cleared the prior worker wiring"
   assert_present "$marker" "pending-close refusal discarded the authoritative close"
   pass "fm-spawn --relaunch: pending closes refuse before replacement begins"
@@ -2541,6 +2613,9 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_same_harness_relaunch_leaves_a_tracked_project_claude_settings_file_untouched
+test_harness_switch_leaves_a_tracked_project_claude_settings_file_untouched
+test_claude_wiring_paths_never_list_a_settings_local_file
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

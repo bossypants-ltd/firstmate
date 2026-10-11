@@ -709,6 +709,130 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+# A Claude task worker's hooks live in state/<id>.claude-settings.json. A task
+# spawned by an older firstmate wrote them into the worktree's own
+# .claude/settings.local.json instead: an untracked copy is that legacy wiring
+# and must not outlive the task in a reused worktree, while a project's
+# committed copy is the project's file and must stay. None of these cases needs
+# a backlog, so they run on a host without tasks-axi too.
+test_teardown_removes_an_untracked_legacy_claude_hook_file() {
+  local case_dir rc wt_head
+  case_dir=$(make_case legacy-claude-hook)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/wt/.claude/settings.local.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-claude-hook: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/wt/.claude/settings.local.json" \
+    "legacy-claude-hook: teardown kept an untracked legacy claude hook file"
+  pass "teardown still removes an untracked legacy claude hook file"
+}
+
+test_teardown_keeps_a_tracked_claude_settings_file() {
+  local case_dir rc wt_head
+  case_dir=$(make_case tracked-claude-settings)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/wt/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test:*)"]}}' > "$case_dir/wt/.claude/settings.local.json"
+  git -C "$case_dir/wt" add -f .claude/settings.local.json
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "project settings"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  cp "$case_dir/wt/.claude/settings.local.json" "$case_dir/settings.committed"
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/state/task-x1.claude-settings.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "tracked-claude-settings: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/wt/.claude/settings.local.json" \
+    "tracked-claude-settings: teardown deleted the project's committed .claude/settings.local.json"
+  cmp -s "$case_dir/settings.committed" "$case_dir/wt/.claude/settings.local.json" \
+    || fail "tracked-claude-settings: teardown changed the project's committed .claude/settings.local.json"
+  [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "tracked-claude-settings: teardown left the worktree dirty: $(git -C "$case_dir/wt" status --porcelain)"
+  assert_absent "$case_dir/state/task-x1.claude-settings.json" \
+    "tracked-claude-settings: teardown kept the per-task claude settings file"
+  pass "teardown keeps a project's committed .claude/settings.local.json and retires the per-task claude settings file"
+}
+
+# A committed .claude/settings.local.json that differs from HEAD in the task
+# copy, staged or not (an older firstmate's spawn truncated it; a worker's
+# "don't ask again" answer can rewrite it), still blocks teardown like any
+# uncommitted change. The refusal also names the file and the restore command,
+# which resets the index too; an unrelated dirty file draws no such line.
+test_teardown_refusal_names_a_changed_tracked_claude_settings_file() {
+  local mode variant dirty_path stage case_dir rc wt_head index_before
+  for mode in no-mistakes local-only; do
+    for variant in settings-unstaged settings-staged unrelated; do
+      case "$variant" in
+        settings-unstaged) dirty_path=.claude/settings.local.json stage=0 ;;
+        settings-staged) dirty_path=.claude/settings.local.json stage=1 ;;
+        unrelated) dirty_path=feature.txt stage=0 ;;
+      esac
+      case_dir=$(make_case "dirty-claude-$mode-$variant")
+      write_meta "$case_dir" "$mode" ship
+      mkdir -p "$case_dir/wt/.claude"
+      printf '%s\n' '{"permissions":{"allow":["Bash(npm test:*)"]}}' > "$case_dir/wt/.claude/settings.local.json"
+      printf '%s\n' landed > "$case_dir/wt/feature.txt"
+      git -C "$case_dir/wt" add -f .claude/settings.local.json feature.txt
+      git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "landed work"
+      # Exercise both dirty refusal sites: remote-reachable work, and local-only
+      # work merged into local main but absent from every remote.
+      if [ "$mode" = local-only ]; then
+        git -C "$case_dir/project" merge -q --ff-only fm/task-x1
+      else
+        git -C "$case_dir/wt" push -q origin fm/task-x1
+      fi
+      wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+      printf '%s\n' '{}' > "$case_dir/wt/$dirty_path"
+      [ "$stage" = 0 ] || git -C "$case_dir/wt" add -f -- "$dirty_path"
+      index_before=$(git -C "$case_dir/wt" ls-files -s)
+
+      set +e
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+      rc=$?
+      set -e
+
+      expect_code 1 "$rc" "dirty $mode/$variant: teardown should refuse: $(cat "$case_dir/stderr")"
+      assert_grep "REFUSED" "$case_dir/stderr" "dirty $mode/$variant: teardown did not refuse"
+      assert_grep "uncommitted changes present (includes tracked edits)" "$case_dir/stderr" \
+        "dirty $mode/$variant: teardown did not report the tracked edit"
+      assert_grep "then --force" "$case_dir/stderr" \
+        "dirty $mode/$variant: teardown dropped the --force guidance"
+      [ "$(cat "$case_dir/wt/$dirty_path")" = "{}" ] \
+        || fail "dirty $mode/$variant: teardown changed the dirty file"
+      [ "$(git -C "$case_dir/wt" ls-files -s)" = "$index_before" ] \
+        || fail "dirty $mode/$variant: teardown changed the worktree index"
+      [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$wt_head" ] \
+        || fail "dirty $mode/$variant: teardown moved the worktree HEAD"
+      [ -f "$case_dir/state/task-x1.meta" ] || fail "dirty $mode/$variant: teardown completed despite dirty work"
+      if [ "$dirty_path" = .claude/settings.local.json ]; then
+        assert_grep "git-tracked .claude/settings.local.json changed after the Claude launch" "$case_dir/stderr" \
+          "dirty $mode/$variant: refusal did not name the changed file"
+        assert_grep "/wt checkout HEAD -- .claude/settings.local.json" "$case_dir/stderr" \
+          "dirty $mode/$variant: refusal did not give the HEAD restore command for the worktree"
+        assert_grep "git -C " "$case_dir/stderr" \
+          "dirty $mode/$variant: refusal did not scope the restore command to the worktree"
+      else
+        assert_no_grep "settings.local.json" "$case_dir/stderr" \
+          "dirty $mode/$variant: refusal must not mention the claude settings file"
+      fi
+    done
+  done
+  pass "teardown refusal names a changed tracked .claude/settings.local.json, staged or not, with its HEAD restore command, and only then"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -4644,6 +4768,9 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_teardown_removes_an_untracked_legacy_claude_hook_file
+test_teardown_keeps_a_tracked_claude_settings_file
+test_teardown_refusal_names_a_changed_tracked_claude_settings_file
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

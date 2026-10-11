@@ -370,22 +370,24 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
 # changes harness (or re-arms the same one with a fresh busy generation) can
 # clear the previous incarnation's wiring instead of leaving a stale hook
 # pointing at a retired generation. Prints zero or more absolute paths, one per
-# line: worktree-resident hook files and firstmate-owned state tokens only,
-# never a harness's own managed config.
+# line: worktree-resident hook files and firstmate-owned state files and tokens
+# only, never a harness's own managed or project settings file (claude's
+# .claude/settings.local.json is one, tracked or not).
 fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [kind]
   local harness=${1-} wt=${2-} state=${3-} id=${4-} kind=${5-}
   [ -n "$wt" ] && [ -n "$state" ] && [ -n "$id" ] || return 1
   case "$harness" in
-    # A secondmate's .claude/settings.local.json belongs to the captain.
-    # Retire only the firstmate-owned settings file the launch passes to
-    # --settings and the Stop pointer that carries the same busy generation.
-    # A crewmate's hook file is the worktree settings.local.json.
+    # Every kind's hooks live in the firstmate-owned settings file the launch
+    # passes to --settings, so retiring that one file retires the incarnation's
+    # wiring. The worktree's (or a mate home's) own .claude/settings.local.json
+    # is never listed: a project may commit it, and this list is deleted on
+    # relaunch, which for a tracked file would drop the project's settings and
+    # dirty the worktree. A secondmate also has the Stop pointer that carries
+    # the same busy generation.
     claude)
+      printf '%s\n' "$state/$id.claude-settings.json"
       if [ "$kind" = secondmate ]; then
-        printf '%s\n' "$state/$id.claude-settings.json"
         printf '%s\n' "$wt/.fm-busy-stop"
-      else
-        printf '%s\n' "$wt/.claude/settings.local.json"
       fi
       ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
