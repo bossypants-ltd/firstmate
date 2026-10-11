@@ -2063,7 +2063,7 @@ claude_expected_launch() {  # <launch> <home> <id> <permission-flag>
   [ "$(printf '%s' "$doorbell" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
     || doorbell="not a launch-brief doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
-  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
+  printf '%s' "export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$2" "$3")$(ai_trailer_hooks_prefix "$2" "$3")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $4 $(claude_worker_add_dirs "$2" "$3")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --no-chrome $CLAUDE_CONTROL_CHANNEL_FLAG $quoted"
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {
@@ -2115,6 +2115,32 @@ test_claude_permission_mode_auto_reaches_scout_launch() {
   assert_contains "$launch" "claude --permission-mode auto " "scout launch did not carry --permission-mode auto"
   assert_not_contains "$launch" "--dangerously-skip-permissions" "scout launch must not request bypass mode"
   pass "config/claude-permission-mode=auto reaches scout launches too"
+}
+
+# With the Claude in Chrome extension installed, an interactive claude launch
+# opens a "Claude in Chrome extension detected" question that parks the pane,
+# and answering it rewrites the captain's global Chrome default. Every Claude
+# launch therefore disables the integration for that session.
+test_claude_ship_and_scout_launches_disable_chrome() {
+  local rec id out status launch
+  id=nochrome-ship-z23
+  rec=$(make_spawn_case nochrome-ship claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude ship spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" " --no-chrome " "ship launch did not disable Claude in Chrome"
+
+  id=nochrome-scout-z24
+  rec=$(make_spawn_case nochrome-scout claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" " --no-chrome " "scout launch did not disable Claude in Chrome"
+  pass "claude ship and scout launches pass --no-chrome"
 }
 
 # A Claude worker's Firstmate channel files all live outside its worktree cwd
@@ -2249,6 +2275,7 @@ test_claude_omits_config_dir_prefix_when_unset
 test_claude_permission_mode_bypass_matches_absent_launch
 test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
+test_claude_ship_and_scout_launches_disable_chrome
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode

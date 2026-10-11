@@ -13,6 +13,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269. See [`Claude permission mode`](../../../../../docs/configuration.md#claude-permission-mode-configclaude-permission-mode) for the launch grant and configuration. |
+| Browser | Every launch passes `--no-chrome`. With the Claude in Chrome extension installed, an interactive launch otherwise parks on a "Claude in Chrome extension detected" question. Answering it, or launching with `CLAUDE_CODE_ENABLE_CFC=0`, writes `claudeInChromeDefaultEnabled` into the captain's global `~/.claude.json`, while `--no-chrome` suppresses the question and writes nothing; verified on 2.1.296. |
 
 ## Workspace trust
 
